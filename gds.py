@@ -7,6 +7,7 @@ import phidl.geometry as pg
 import phidl.routing as pr
 import numpy as np
 from collections.abc import Callable
+import matplotlib.pyplot as plt
 
 set_quickplot_options(blocking=True, show_subports=True)
 
@@ -22,11 +23,11 @@ set_quickplot_options(blocking=True, show_subports=True)
 class DeviceParameters:
     total_length: float
 
-    crystal_length: float
     crystal_width: float
+    crystal_height: float
     bridge_width: float
-    defect_length: float
     defect_width: float
+    defect_height: float
 
     lattice_constant: float
     crystal_count: int
@@ -48,17 +49,16 @@ class DeviceParameters:
         return self.lattice_constant*self.crystal_count
     
     def total_crystal_length(self) -> float:
-        return self.half_crystal_length()*2 + self.defect_length
-        
+        return self.half_crystal_length()*2 + self.defect_width
 
-def generate_device(parameters: DeviceParameters):
+def generate_device(parameters: DeviceParameters, include_blank: bool = True):
     assert parameters.crystal_count % 2 == 1
 
     device = Device()
 
     half_crystal = Device()
 
-    crystal_t = pg.rectangle((parameters.crystal_length, parameters.crystal_width), parameters.crystal_layer)
+    crystal_t = pg.rectangle((parameters.crystal_width, parameters.crystal_height), parameters.crystal_layer)
 
     half_crystal.add_ref([crystal_t] * parameters.crystal_count)
 
@@ -76,7 +76,7 @@ def generate_device(parameters: DeviceParameters):
     left_half = device.add_ref(half_crystal)
     right_half = device.add_ref(half_crystal)
     
-    defect = device.add_ref(pg.straight((parameters.defect_width, parameters.defect_length), parameters.crystal_layer))
+    defect = device.add_ref(pg.straight((parameters.defect_height, parameters.defect_width), parameters.crystal_layer))
     defect.move(defect.center, (0,0))
     defect.rotate(90)
     
@@ -86,9 +86,9 @@ def generate_device(parameters: DeviceParameters):
     device.add_port(2, port=left_half.ports[2])
     device.add_port(1, port=right_half.ports[1])
  
-    internal_electrode = pg.rectangle((parameters.total_crystal_length(), max(parameters.defect_width, parameters.crystal_width)+0.1), layer=parameters.electrode_layer)
+    internal_electrode = pg.rectangle((parameters.total_crystal_length(), max(parameters.defect_height, parameters.crystal_height)+0.1), layer=parameters.electrode_layer)
     internal_electrode.move(internal_electrode.center, defect.center)
-    electrode_gap=pg.rectangle((parameters.defect_length-(parameters.electrode_overlap*2 if not parameters.off_defect else 0), parameters.total_crystal_length()))
+    electrode_gap=pg.rectangle((parameters.defect_width-(parameters.electrode_overlap*2 if not parameters.off_defect else 0), parameters.total_crystal_length()))
     electrode_gap.move(electrode_gap.center, defect.center)
     # electrode_gap.rotate(-45, center=electrode_gap.center)
 
@@ -102,6 +102,12 @@ def generate_device(parameters: DeviceParameters):
         
         outline = pg.boolean(outline, end_uncover, operation='NOT', layer=parameters.outline_layer)
         device.remove(end_uncover)
+    
+    if not include_blank:
+        # return outline
+        test = Device()
+        test.add_ref(pg.offset(pg.bbox(bbox=outline.bbox), distance=1))
+        return pg.boolean(test, outline, operation="A-B")
 
     device.add_ref(internal_electrode)
     # device.add_ref(electrode_circles)
@@ -122,22 +128,24 @@ def generate_device(parameters: DeviceParameters):
     return device
 
 def generate_pads(
-    layer: int
+    width : int,
+    height : int,
+    layer: int,
 ):
     pads = Device()
 
-    pad = pg.straight((150, 150), layer=layer)
+    pad = pg.straight((width, height), layer=layer)
 
     left_pad = pads.add_ref(pad)
     center_pad = pads.add_ref(pad)
     right_pad = pads.add_ref(pad)
 
-    pads.distribute(spacing=75)
+    pads.distribute(spacing=width/2)
 
-    left_pad_top = pads.add_ref(pg.compass_multi((150, 150), ports={'E': 2, 'S': 1}, layer=layer))
+    left_pad_top = pads.add_ref(pg.compass_multi((width, width), ports={'E': 2, 'S': 1}, layer=layer))
     left_pad_top.connect('S1', left_pad.ports[1])
 
-    right_pad_top = pads.add_ref(pg.compass_multi((150, 150), ports={'W': 2, 'S': 1}, layer=layer))
+    right_pad_top = pads.add_ref(pg.compass_multi((width, width), ports={'W': 2, 'S': 1}, layer=layer))
     right_pad_top.connect('S1', right_pad.ports[1])
 
     top_connection = pads.add_ref(pr.route_quad(right_pad_top.ports['W2'], left_pad_top.ports['E2'], layer=layer))
@@ -148,11 +156,13 @@ def generate_pads(
 
     return pads
     
-def generate_waveguides(
+def generate_waveguide(
     device_count: int,
     device_spacing: float,
     gap_spacing: float,
     device_parameters: DeviceParameters,
+    pad_width: int,
+    pad_height: int,
     layer: int, 
     device_parameters_factory: Callable[[DeviceParameters, int], DeviceParameters],
     coordinates: str
@@ -173,7 +183,7 @@ def generate_waveguides(
         device_i.connect("W", center_electrode.ports[f"E{half_device_count-i}"], overlap=(device_parameters.total_length-gap_spacing)/2)
 
 
-    side_electrode_width = (600-gap_spacing*4)/2
+    side_electrode_width = (pad_width*4-gap_spacing*4)/2
 
     side_electrode = pg.compass_multi((side_electrode_width, electrode_height), {"N": 1, "S": 1, "E": device_count, "W": device_count}, layer=layer)
     left_electrode = waveguides.add_ref(side_electrode)
@@ -190,7 +200,7 @@ def generate_waveguides(
 
     bottom_connection = waveguides.add_ref(pr.route_quad(left_electrode_bottom.ports['E1'], right_electrode_bottom.ports['W1'], layer=layer))
 
-    pads = waveguides.add_ref(generate_pads(layer=layer))
+    pads = waveguides.add_ref(generate_pads(pad_width, pad_height, layer))
 
     pads.connect('C', center_electrode.ports["N1"], -100)
 
@@ -213,28 +223,33 @@ def generate_waveguides(
     if not label_text:
         label_text = "on_defect"
 
-    label = waveguides.add_ref(pg.text(text=label_text, justify='center', size=40, layer=layer))
-    label.move(destination=(0, 470))
-
-    coordinate_text = waveguides.add_ref(pg.text(text=coordinates, justify='left', size=50, layer=layer))
-    coordinate_text.rotate(-90, coordinate_text.center)
-    coordinate_text.move(destination=(270,350))
+    xmax = waveguides.xmax
+    ymax = waveguides.ymax
     
+    label = waveguides.add_ref(pg.text(text=label_text, justify='center', size=40, layer=layer))
+    label.move(destination=(0, ymax+20))
+
+    coordinate_text = waveguides.add_ref(pg.text(text=coordinates, justify='left', size=40, layer=layer))
+    coordinate_text.move(destination=(xmax,ymax+15))
+    coordinate_text.rotate(-90, (xmax, ymax))
+    
+    # quickplot(waveguides)
+
     waveguides.rotate(45, waveguides.center)
     
     return waveguides
 
-def main():
+def generate_waveguide_grid():
     device_parameters = DeviceParameters(
-        total_length   = 40,
-        crystal_length  = 0.6 + 0.03,
-        crystal_width = 0.77,
-        crystal_count  = 5,
-        lattice_constant= 0.92,
-        bridge_width   = 0.180 + 0.045,
-        defect_width  = 0.9,
-        defect_length   = 0.515,
-        outline_width  = 0.3,
+        total_length    = 40.0,
+        crystal_width   = 0.600 + 0.030,
+        crystal_height  = 0.770,
+        bridge_width    = 0.180 + 0.045,
+        defect_height   = 0.540 + 0.030,
+        defect_width    = 0.380 + 0.030-0.040, #down 50 up 50 (370-460)
+        lattice_constant= 0.920,
+        crystal_count   = 5,
+        outline_width   = 0.3,
         electrode_overlap=0.1, 
         external_electrode_width=1.92,
         external_electrode_skew=5,
@@ -242,7 +257,7 @@ def main():
 
     def device_parameters_factory(device_parameters_o: DeviceParameters, i: int):
         device_parameters=copy.copy(device_parameters_o)
-        device_parameters.defect_length += i*0.015
+        device_parameters.defect_width += i*0.010
         return device_parameters
 
     layout = Device()
@@ -252,27 +267,99 @@ def main():
     shorted = (1, 0, 0)
     unetched = (1, 1, 0)
 
-    columns = [normal, off_defect, shorted, unetched]
+    #7
+    columns = [normal, off_defect]*3 + [normal]*1
 
-    for i in range(8):
-        (device_parameters.shorted, device_parameters.unetched, device_parameters.off_defect) = columns[floor(i/2)]
-        for j in range(8):
-            cell = layout.add_ref(generate_waveguides(
+    for x, column_type in enumerate(columns):
+        for y in range(4):
+            type = column_type
+            if y == 0: type = shorted if x%2==0 else unetched
+            (device_parameters.shorted, device_parameters.unetched, device_parameters.off_defect) = type
+            cell = layout.add_ref(generate_waveguide(
                 device_count=10, 
                 device_spacing=20, 
                 gap_spacing=25, 
                 device_parameters=device_parameters,
                 layer=2, 
+                pad_width=300,
+                pad_height=450,
                 device_parameters_factory=device_parameters_factory,
-                coordinates=f"({i},{j})"
+                coordinates=f"({x},{y})"
             ))
-            cell.move(destination=(600*i, 1000*j + (i%2)*500))
+            cell.move(destination=((cell.xsize*0.75)*x, cell.ysize*(y+0.5*(x%2))))
 
+    layout.center = (0, 0)
 
     # quickplot(layout)
     layout.write_gds("out.gds")
+    print("written to out.gds")
+
+
+def generate_crystal_geometry():
+    device_parameters = DeviceParameters(
+        total_length    = 40.0,
+        crystal_width   = 0.600 + 0.030,
+        crystal_height  = 0.770,
+        bridge_width    = 0.180 + 0.045,
+        defect_height   = 0.540 + 0.030,
+        defect_width    = 0.380 + 0.030-0.040, #down 50 up 50 (370-460)
+        lattice_constant= 0.920,
+        crystal_count   = 5,
+        outline_width   = 0.3,
+        electrode_overlap=0.1, 
+        external_electrode_width=1.92,
+        external_electrode_skew=5,
+    )
+
+    device=generate_device(device_parameters, False)
+    quickplot(device)
+    polygons = device.get_polygons()
+    # polygons = [((0,0), (1, 0), (1, 1), (0, 1))]
+
+    # Plot polygons using matplotlib
+    fig, ax = plt.subplots()
+    for poly in polygons:
+      poly = np.array(poly)
+      ax.fill(poly[:, 0], poly[:, 1], alpha=0.5)
+    ax.set_aspect('equal')
+    plt.show()
+
+
+    depth = 0.1
+    winding_order = False
+    with open("crystal_geometry.obj", "w") as f:
+      vertex_count = 1
+      for poly in polygons:
+        poly = np.array(poly)
+        # Write bottom vertices (z=0)
+        for v in poly:
+          f.write(f"v {v[0]} {v[1]} 0.0\n")
+        # Write top vertices (z=0.01)
+        for v in poly:
+          f.write(f"v {v[0]} {v[1]} {depth}\n")
+        n = len(poly)
+        # Write faces for sides (reverse winding for correct normals)
+        for i in range(n):
+          v0 = vertex_count + i
+          v1 = vertex_count + (i + 1) % n
+          v2 = vertex_count + n + (i + 1) % n
+          v3 = vertex_count + n + i
+          # Reverse order for correct normal direction
+          if not winding_order: f.write(f"f {v0} {v1} {v2} {v3}\n")
+          else: f.write(f"f {v0} {v3} {v2} {v1}\n")
+
+        # Write face for bottom (counter-clockwise)
+        f.write("f " + " ".join(str(vertex_count + i) for i in (range(n) if winding_order else reversed(range(n)))) + "\n")
+
+        # Write face for top (clockwise, reverse order)
+        f.write("f " + " ".join(str(vertex_count + n + i) for i in (range(n) if not winding_order else reversed(range(n)))) + "\n")
+        vertex_count += 2 * n
+    # device.write_gds("test.gds")
+
+
 
 
 
 if __name__ == "__main__":
-    main()
+    generate_waveguide_grid()
+    # generate_crystal_geometry()
